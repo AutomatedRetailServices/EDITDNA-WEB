@@ -58,4 +58,3 @@ def job_status(job_id: str):
         "ended_at": job.ended_at,
     }
     return out
-
