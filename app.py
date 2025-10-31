@@ -30,7 +30,7 @@ def health():
 def render(req: RenderReq):
     payload = req.model_dump()
     job = q.enqueue(
-        "editdna.tasks.job_render",   # <<< THIS STRING IS CRITICAL
+        "editdna.job_render",   # <<< THIS STRING IS CRITICAL
         payload,
         job_timeout=60 * 40
     )
