@@ -1,4 +1,3 @@
-# app.py — FastAPI + RQ enqueue + job status
 import os
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -7,7 +6,6 @@ from rq import Queue
 from rq.job import Job
 
 REDIS_URL = os.environ["REDIS_URL"]
-
 r = Redis.from_url(REDIS_URL)
 q = Queue("default", connection=r)
 
@@ -15,9 +13,8 @@ class RenderReq(BaseModel):
     session_id: str | None = None
     files: list[str]
     portrait: bool = True
-    max_duration: int = 60
-    audio: str = "original"
-    output_prefix: str = "editdna/outputs"
+    max_duration: int = 220
+    output_prefix: str = "editdna/outputs/"
 
 app = FastAPI()
 
@@ -32,7 +29,11 @@ def health():
 @app.post("/render")
 def render(req: RenderReq):
     payload = req.model_dump()
-    job = q.enqueue("tasks.job_render", payload, job_timeout=60 * 40)
+    job = q.enqueue(
+        "editdna.tasks.job_render",   # <<< THIS STRING IS CRITICAL
+        payload,
+        job_timeout=60 * 40
+    )
     return {"job_id": job.id, "status": "queued"}
 
 @app.get("/jobs/{job_id}")
