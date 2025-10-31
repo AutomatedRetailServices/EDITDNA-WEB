@@ -33,7 +33,7 @@ def health():
 def render(req: RenderReq):
     payload = req.model_dump()
     # 👇 important fix: tell Redis the full module path in the worker pod
-    job = q.enqueue("editdna.tasks.job_render", payload, job_timeout=60 * 40)
+   job = q.enqueue("tasks.job_render", payload, job_timeout=60 * 40)
     return {"job_id": job.id, "status": "queued"}
 
 @app.get("/jobs/{job_id}")
