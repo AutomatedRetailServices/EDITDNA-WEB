@@ -1,64 +1,69 @@
-# app.py — FastAPI + RQ enqueue + job status
-
 import os
+from typing import List, Optional
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from redis import Redis
+
+import redis
 from rq import Queue
-from rq.job import Job
 
-# ENV
-REDIS_URL = os.environ["REDIS_URL"]
+REDIS_URL = os.getenv("REDIS_URL")
+if not REDIS_URL:
+    raise RuntimeError("REDIS_URL not set")
 
-# Redis / RQ wiring
-r = Redis.from_url(REDIS_URL)
-q = Queue("default", connection=r)
+redis_conn = redis.from_url(REDIS_URL)
+q = Queue("default", connection=redis_conn)
 
-# incoming request body for /render
-class RenderReq(BaseModel):
-    session_id: str | None = None
-    files: list[str]                # list of public / presigned video URLs
-    portrait: bool = True
-    max_duration: int = 220
-    audio: str = "original"         # not deeply used yet
-    output_prefix: str = "editdna/outputs"
+app = FastAPI(title="EditDNA API")
 
-app = FastAPI()
+
+class RenderRequest(BaseModel):
+    session_id: str
+    files: List[str]
+    s3_prefix: Optional[str] = "editdna/outputs/"
+
 
 @app.get("/health")
 def health():
-    try:
-        pong = r.ping()
-        return {"ok": True, "redis": bool(pong)}
-    except Exception as e:
-        raise HTTPException(500, f"redis error: {e}")
+    return {"ok": True}
+
 
 @app.post("/render")
-def render(req: RenderReq):
-    # push a job onto Redis so the worker can pick it up
-    payload = req.model_dump()
+def render(req: RenderRequest):
+    """
+    Enqueue a job for the GPU worker (RunPod).
+    The worker must have the EditDNA-worker repo with tasks.job_render.
+    """
+    if not req.files:
+        raise HTTPException(status_code=400, detail="files list cannot be empty")
 
-    # IMPORTANT: enqueue USING "tasks.job_render"
-    # DO NOT CHANGE THIS STRING unless you rename tasks.py
-    job = q.enqueue("tasks.job_render", payload, job_timeout=60 * 40)
+    job = q.enqueue(
+        "tasks.job_render",  # string path; resolved on the WORKER side
+        req.session_id,
+        req.files,
+        s3_prefix=req.s3_prefix,
+    )
 
-    return {"job_id": job.id, "status": "queued"}
-
-@app.get("/jobs/{job_id}")
-def jobs(job_id: str):
-    job = Job.fetch(job_id, connection=r)
-
-    out = {
-        "id": job.id,
-        "status": job.get_status(),      # queued / started / finished / failed
-        "enqueued_at": job.enqueued_at,
-        "started_at": job.started_at,
-        "ended_at": job.ended_at,
-        "result": job.result if job.is_finished else None,
-        "meta": job.meta or {},
+    return {
+        "job_id": job.get_id(),
+        "status": job.get_status(),
     }
 
-    if job.is_failed:
-        out["error"] = str(job.exc_info or "")
 
-    return out
+@app.get("/jobs/{job_id}")
+def get_job(job_id: str):
+    from rq.job import Job
+    try:
+        job = Job.fetch(job_id, connection=redis_conn)
+    except Exception:
+        raise HTTPException(status_code=404, detail="job not found")
+
+    resp = {
+        "id": job.id,
+        "status": job.get_status(),
+    }
+    if job.is_finished:
+        resp["result"] = job.result
+    if job.is_failed:
+        resp["error"] = str(job.exc_info)
+    return resp
