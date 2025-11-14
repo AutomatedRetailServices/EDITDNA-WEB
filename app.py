@@ -1,69 +1,78 @@
 import os
 from typing import List, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from pydantic import BaseModel
-
 import redis
-from rq import Queue
+from rq import Queue, Job
 
-REDIS_URL = os.getenv("REDIS_URL")
-if not REDIS_URL:
-    raise RuntimeError("REDIS_URL not set")
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
 redis_conn = redis.from_url(REDIS_URL)
-q = Queue("default", connection=redis_conn)
+queue = Queue("default", connection=redis_conn)
 
-app = FastAPI(title="EditDNA API")
+app = FastAPI(title="EditDNA Web API")
 
+
+# ---------- Models ----------
 
 class RenderRequest(BaseModel):
     session_id: str
     files: List[str]
-    s3_prefix: Optional[str] = "editdna/outputs/"
 
+
+class RenderEnqueueResponse(BaseModel):
+    ok: bool
+    job_id: str
+    status: str
+
+
+class JobStatusResponse(BaseModel):
+    ok: bool
+    job_id: str
+    status: str
+    result: Optional[dict] = None
+    error: Optional[str] = None
+
+
+# ---------- Routes ----------
 
 @app.get("/health")
 def health():
     return {"ok": True}
 
 
-@app.post("/render")
+@app.post("/render", response_model=RenderEnqueueResponse)
 def render(req: RenderRequest):
     """
-    Enqueue a job for the GPU worker (RunPod).
-    The worker must have the EditDNA-worker repo with tasks.job_render.
+    Enqueue a render job into RQ.
+    Worker will run tasks.job_render(session_id=..., files=[...])
     """
-    if not req.files:
-        raise HTTPException(status_code=400, detail="files list cannot be empty")
-
-    job = q.enqueue(
-        "tasks.job_render",  # string path; resolved on the WORKER side
-        req.session_id,
-        req.files,
-        s3_prefix=req.s3_prefix,
+    job: Job = queue.enqueue(
+        "tasks.job_render",  # resolved in the worker container
+        kwargs={
+            "session_id": req.session_id,
+            "files": req.files,
+        },
     )
-
-    return {
-        "job_id": job.get_id(),
-        "status": job.get_status(),
-    }
+    return RenderEnqueueResponse(ok=True, job_id=job.id, status=job.get_status())
 
 
-@app.get("/jobs/{job_id}")
-def get_job(job_id: str):
-    from rq.job import Job
-    try:
-        job = Job.fetch(job_id, connection=redis_conn)
-    except Exception:
-        raise HTTPException(status_code=404, detail="job not found")
-
-    resp = {
-        "id": job.id,
-        "status": job.get_status(),
-    }
-    if job.is_finished:
-        resp["result"] = job.result
+@app.get("/job/{job_id}", response_model=JobStatusResponse)
+def job_status(job_id: str):
+    job = Job.fetch(job_id, connection=redis_conn)
     if job.is_failed:
-        resp["error"] = str(job.exc_info)
-    return resp
+        return JobStatusResponse(
+            ok=False,
+            job_id=job.id,
+            status=job.get_status(),
+            result=None,
+            error=str(job.exc_info),
+        )
+    return JobStatusResponse(
+        ok=True,
+        job_id=job.id,
+        status=job.get_status(),
+        result=job.result,
+        error=None,
+    )
