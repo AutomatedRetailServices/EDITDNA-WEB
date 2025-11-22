@@ -1,44 +1,53 @@
-# web/tasks.py
-# Adapter entre la API y el Worker GPU
-# Cuando el cliente llama: API → job_render() → encolamos tasks.job_render en Redis
+# web/tasks.py — Web/API task adapter
+# -----------------------------------
+# Propósito: tomar la request del API y encolar un job dentro de Redis/RQ
+# para que el GPU worker (que tiene su propio tasks.py) haga el trabajo real.
 
 import os
 import uuid
 from typing import Any, Dict, List
+
 from redis import Redis
 from rq import Queue
 
-# Config Redis
+
+# Obtener la URL de Redis desde el entorno
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 redis_conn = Redis.from_url(REDIS_URL)
+
+# Tu worker está escuchando en la cola "default"
 q = Queue("default", connection=redis_conn)
 
 
 def job_render(data: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Esta función la llama la API.
-    Encola un trabajo para que el worker lo ejecute (tasks.job_render)
+    API-facing helper.
+    Lo llamas desde tu ruta web (app.py).
+    Empuja un job que al llegar al worker llamará a 'tasks.job_render'.
     """
 
-    session_id = data.get("session_id", f"session-{uuid.uuid4().hex[:8]}")
+    # Nos aseguramos de tener un session_id
+    session_id = data.get("session_id") or uuid.uuid4().hex[:8]
 
     payload: Dict[str, Any] = {
         "session_id": session_id,
         "files": data.get("files", []),
         "portrait": bool(data.get("portrait", True)),
         "max_duration": float(data.get("max_duration", 120.0)),
-        "s3_prefix": data.get("s3_prefix", "editdna/outputs/")
+        "s3_prefix": data.get("s3_prefix", "editdna/outputs"),
     }
 
-    # Si vienen prompts en la API (más adelante)
+    # Pasar funnel_counts si viene en el payload
     if "funnel_counts" in data:
         payload["funnel_counts"] = data["funnel_counts"]
 
-    # 🚀 Aquí es la clave:
+    # 🔑 AQUÍ está la clave:
+    # Encolamos por NOMBRE: "tasks.job_render"
+    # → esto es lo que el worker debe resolver (tasks.py en el worker repo)
     job = q.enqueue("tasks.job_render", payload)
 
     return {
         "ok": True,
         "job_id": job.id,
-        "session_id": session_id
+        "session_id": session_id,
     }
