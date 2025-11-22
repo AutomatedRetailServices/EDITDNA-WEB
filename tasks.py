@@ -1,8 +1,3 @@
-# web/tasks.py — Web/API task adapter
-# -----------------------------------
-# Propósito: tomar la request del API y encolar un job dentro de Redis/RQ
-# para que el GPU worker (que tiene su propio tasks.py) haga el trabajo real.
-
 import os
 import uuid
 from typing import Any, Dict, List
