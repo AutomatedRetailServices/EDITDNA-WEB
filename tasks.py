@@ -57,3 +57,4 @@ def job_render(data: Dict[str, Any]) -> Dict[str, Any]:
         "job_id": job.id,
         "session_id": session_id,
     }
+
