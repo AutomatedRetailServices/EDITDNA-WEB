@@ -18,14 +18,13 @@ def job_render(data: Dict[str, Any]) -> Dict[str, Any]:
     API-facing helper.
 
     Lo llamas desde tu ruta web (app.py).
-    Empuja un job a la cola que luego el worker llama a tasks.job_render
-    (en el repo del worker).
+    Empuja un job a la cola que luego el worker llama a worker.tasks.run_pipeline_job.
     """
 
     # Nos aseguramos de tener un session_id
     session_id = data.get("session_id") or uuid.uuid4().hex[:8]
 
-    # Normalizar mode: "human" | "clean" | "blooper"
+    # Normalizar mode: "human" ← "clean" ← "blooper"
     mode = (data.get("mode") or "human").lower()
     if mode not in ("human", "clean", "blooper"):
         mode = "human"
@@ -37,16 +36,21 @@ def job_render(data: Dict[str, Any]) -> Dict[str, Any]:
         "portrait": bool(data.get("portrait", True)),
         "max_duration": float(data.get("max_duration", 120.0)),
         "s3_prefix": data.get("s3_prefix", "editdna/outputs"),
-        "mode": mode,  # 👈👈 AQUÍ VA LA CLAVE
+        "mode": mode,
     }
 
     # Pasar funnel_counts si viene en el payload
     if "funnel_counts" in data:
         payload["funnel_counts"] = data["funnel_counts"]
 
-    # Encolamos por NOMBRE: "tasks.job_render"
-    # Esto es lo que el worker debe resolver (tasks.py en el worker repo)
-    job = q.enqueue("tasks.job_render", payload)
+    # AQUI ESTÁ LA CLAVE 🔥🔥🔥
+    # Encolamos por NOMBRE → worker.tasks.run_pipeline_job
+    job = q.enqueue(
+        "worker.tasks.run_pipeline_job",
+        payload,
+        job_timeout=60 * 30,
+        result_ttl=60 * 60 * 24,
+    )
 
     return {
         "ok": True,
