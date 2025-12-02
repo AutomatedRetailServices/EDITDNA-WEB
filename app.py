@@ -4,8 +4,7 @@ from typing import List, Optional
 from fastapi import FastAPI
 from pydantic import BaseModel
 import redis
-from rq import Queue
-from rq.job import Job
+from rq import Queue, job as rq_job
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
@@ -20,8 +19,8 @@ app = FastAPI(title="EditDNA Web API")
 class RenderRequest(BaseModel):
     session_id: str
     files: List[str]
-    # modo del funnel: "human", "clean" o "blooper"
-    mode: str = "human"
+    # modo del funnel: "human" | "clean" | "blooper"
+    mode: Optional[str] = "human"
 
 
 class RenderEnqueueResponse(BaseModel):
@@ -49,18 +48,14 @@ def health():
 def render(req: RenderRequest):
     """
     Enqueue a render job into RQ.
-    Worker will run tasks.job_render(
-        session_id=...,
-        files=[...],
-        mode="human" | "clean" | "blooper"
-    )
+    Worker will run tasks.job_render(session_id=..., files=[...], mode=...)
     """
-    job: Job = queue.enqueue(
+    job = queue.enqueue(
         "tasks.job_render",  # resolved in the worker container
         kwargs={
             "session_id": req.session_id,
             "files": req.files,
-            "mode": req.mode,
+            "mode": (req.mode or "human"),
         },
     )
     return RenderEnqueueResponse(ok=True, job_id=job.id, status=job.get_status())
@@ -68,7 +63,9 @@ def render(req: RenderRequest):
 
 @app.get("/job/{job_id}", response_model=JobStatusResponse)
 def job_status(job_id: str):
-    job = Job.fetch(job_id, connection=redis_conn)
+    # Usamos API pública de rq para leer el job
+    job = rq_job.Job.fetch(job_id, connection=redis_conn)
+
     if job.is_failed:
         return JobStatusResponse(
             ok=False,
