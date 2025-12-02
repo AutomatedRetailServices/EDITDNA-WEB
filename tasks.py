@@ -1,53 +1,148 @@
 import os
-import uuid
-from typing import Any, Dict, List
+import logging
+from typing import List, Optional, Literal, Dict, Any
 
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 from redis import Redis
-from rq import Queue
-from rq.job import Job   # 👈 IMPORT CORRECTO
+from rq import Queue, Job
 
-# Obtener la URL de Redis desde el entorno
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+from pipeline import run_pipeline
+
+# =====================
+# LOGGING
+# =====================
+
+logger = logging.getLogger("editdna.tasks")
+logger.setLevel(logging.INFO)
+
+# =====================
+# REDIS / RQ
+# =====================
+
+REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379/0")
+REDIS_QUEUE_NAME = os.environ.get("REDIS_QUEUE_NAME", "editdna")
+
 redis_conn = Redis.from_url(REDIS_URL)
+queue = Queue(REDIS_QUEUE_NAME, connection=redis_conn)
 
-# Tu worker está escuchando en la cola "default"
-q = Queue("default", connection=redis_conn)
+# =====================
+# FASTAPI
+# =====================
+
+app = FastAPI()
 
 
-def job_render(data: Dict[str, Any]) -> Dict[str, Any]:
+class RenderRequest(BaseModel):
+    session_id: str
+    files: Optional[List[str]] = None
+    file_urls: Optional[List[str]] = None
+    mode: Literal["human", "clean", "blooper"] = "human"
+
+
+class JobResponse(BaseModel):
+    job_id: str
+    status: str
+
+
+@app.post("/render", response_model=JobResponse)
+def create_render_job(req: RenderRequest):
     """
-    API-facing helper.
-    Lo llamas desde tu ruta web (app.py).
-    Empuja un job a la cola que luego el worker llama a tasks.job_render
-    (en el repo del worker).
+    Enqueue a render job.
+    VERY IMPORTANT: we forward req.mode directly to the worker.
     """
-
-    session_id = data.get("session_id") or uuid.uuid4().hex[:8]
-
-    # Normalizar mode: "human" | "clean" | "blooper"
-    mode = (data.get("mode") or "human").lower()
+    # Normalize mode, but DO NOT ignore what user sent
+    mode = (req.mode or "human").lower()
     if mode not in ("human", "clean", "blooper"):
         mode = "human"
 
-    payload: Dict[str, Any] = {
-        "session_id": session_id,
-        "files": data.get("files", []),
-        "file_urls": data.get("file_urls", []),
-        "portrait": bool(data.get("portrait", True)),
-        "max_duration": float(data.get("max_duration", 120.0)),
-        "s3_prefix": data.get("s3_prefix", "editdna/outputs"),
-        "mode": mode,         # 👈 CLAVE: enviarlo al worker
-    }
+    files = req.files or req.file_urls
+    if not files:
+        raise HTTPException(
+            status_code=400,
+            detail="You must provide 'files' or 'file_urls'",
+        )
 
-    # Pasar funnel_counts si viene en el payload
-    if "funnel_counts" in data:
-        payload["funnel_counts"] = data["funnel_counts"]
+    logger.info(
+        f"/render called: session_id={req.session_id} "
+        f"mode={mode} raw_body={req.dict()}"
+    )
 
-    # Encolamos por NOMBRE: "tasks.job_render"
-    job = q.enqueue("tasks.job_render", payload)
+    job: Job = queue.enqueue(
+        "tasks.run_pipeline_job",
+        kwargs={
+            "session_id": req.session_id,
+            "files": files,
+            "file_urls": None,
+            "mode": mode,
+        },
+        job_timeout=60 * 30,
+        result_ttl=60 * 60 * 24,
+    )
+
+    logger.info(
+        f"Enqueued job id={job.id} "
+        f"session_id={req.session_id} mode={mode}"
+    )
+
+    return JobResponse(job_id=job.id, status="queued")
+
+
+@app.get("/jobs/{job_id}")
+def get_job(job_id: str):
+    """
+    Return job status + result.
+    """
+    try:
+        job = Job.fetch(job_id, connection=redis_conn)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Job not found")
 
     return {
-        "ok": True,
-        "job_id": job.id,
-        "session_id": session_id,
+        "id": job.id,
+        "status": job.get_status(),
+        "enqueued_at": job.enqueued_at,
+        "started_at": job.started_at,
+        "ended_at": job.ended_at,
+        "result": job.result,
+        "meta": job.meta,
     }
+
+
+# =====================
+# WORKER ENTRYPOINT
+# =====================
+
+def run_pipeline_job(
+    session_id: str,
+    files: Optional[List[str]] = None,
+    file_urls: Optional[List[str]] = None,
+    mode: str = "human",
+) -> Dict[str, Any]:
+    """
+    This is what the RQ worker actually runs.
+    It MUST pass mode straight to pipeline.run_pipeline.
+    """
+    mode = (mode or "human").lower()
+    if mode not in ("human", "clean", "blooper"):
+        mode = "human"
+
+    logger.info(
+        f"run_pipeline_job: session_id={session_id} "
+        f"mode={mode} files={files} file_urls={file_urls}"
+    )
+
+    result = run_pipeline(
+        session_id=session_id,
+        files=files,
+        file_urls=file_urls,
+        mode=mode,
+    )
+
+    logger.info(
+        "run_pipeline_job finished: "
+        f"composer_mode={result.get('composer_mode')} "
+        f"composer.mode={result.get('composer', {}).get('mode')}"
+    )
+
+    return result
