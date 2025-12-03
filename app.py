@@ -80,7 +80,7 @@ def render(req: RenderRequest):
             "file_urls": None,
             "mode": mode,
         },
-        job_timeout=JOB_TIMEOUT,      # ⏱️ 30 minutos por defecto
+        job_timeout=JOB_TIMEOUT,      # ⏱️ 30 minutos
         result_ttl=RESULT_TTL,        # resultado vive 24h
         failure_ttl=FAILURE_TTL,      # errores viven 24h
     )
